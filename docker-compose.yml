@@ -1,0 +1,10 @@
+services:
+  pdf2cbz:
+    build: .
+    image: pdf2cbz
+    volumes:
+      - ./data:/data
+    working_dir: /app
+    # Pass arguments here or override via command line
+    # Example usage: docker-compose run --rm pdf2cbz -i /data/input.pdf
+    command: ["--help"]
