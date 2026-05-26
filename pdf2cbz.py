@@ -5,8 +5,10 @@ import io
 import zipfile
 import os
 import sys
+import concurrent.futures
 
 import xml.etree.ElementTree as ET
+
 
 def generate_comic_info(metadata):
     """Generates ComicInfo.xml content from PDF metadata."""
@@ -20,9 +22,9 @@ def generate_comic_info(metadata):
         ET.SubElement(root, "Writer").text = metadata["author"]
     if metadata.get("subject"):
         ET.SubElement(root, "Summary").text = metadata["subject"]
-    
+
     # Generate pretty XML string
-    # Python's xml.etree doesn't do pretty printing easily in older versions, 
+    # Python's xml.etree doesn't do pretty printing easily in older versions,
     # but we can just write the string.
     try:
         xml_str = ET.tostring(root, encoding="utf-8", method="xml")
@@ -30,7 +32,9 @@ def generate_comic_info(metadata):
     except Exception:
         return None
 
-def convert_pdf_to_cbz(pdf_path, cbz_path, image_format="webp", quality=80, dpi=None, grayscale=False):
+
+def convert_pdf_to_cbz(pdf_path, cbz_path, image_format="webp", quality=80,
+                       dpi=None, grayscale=False):
     """Converts a PDF to a CBZ archive."""
     if image_format not in ("png", "webp"):
         raise ValueError("Unsupported image format. Choose 'png' or 'webp'.")
@@ -49,14 +53,15 @@ def convert_pdf_to_cbz(pdf_path, cbz_path, image_format="webp", quality=80, dpi=
             cbz.writestr("ComicInfo.xml", xml_data)
 
         for page_num in range(total_pages):
-            print(f"Processing page {page_num + 1}/{total_pages}...", end='\r', flush=True)
+            print(f"Processing page {page_num + 1}/{total_pages}...",
+                  end='\r', flush=True)
 
             page = doc.load_page(page_num)
             pix = page.get_pixmap(matrix=matrix)
-            
+
             # Use method call for pil_image()
             img = pix.pil_image().convert('RGB')
-            
+
             if grayscale:
                 img = img.convert('L')
 
@@ -65,7 +70,7 @@ def convert_pdf_to_cbz(pdf_path, cbz_path, image_format="webp", quality=80, dpi=
                 img.save(img_buffer, format="WEBP", quality=quality)
             else:
                 img.save(img_buffer, format="PNG")
-            
+
             img_bytes = img_buffer.getvalue()
             img_filename = f"page_{page_num + 1:0{num_digits}d}.{image_format}"
             cbz.writestr(img_filename, img_bytes)
@@ -73,38 +78,127 @@ def convert_pdf_to_cbz(pdf_path, cbz_path, image_format="webp", quality=80, dpi=
     doc.close()
     print(f"\nConversion complete: {cbz_path}")
 
-# ... (convert_cbz_to_pdf remains unchanged)
 
-import concurrent.futures
+def convert_cbz_to_pdf(cbz_path, pdf_path):
+    """Converts a CBZ archive to a PDF."""
+    print(f"Converting {cbz_path}...")
+    try:
+        doc = fitz.open()
+        with zipfile.ZipFile(cbz_path, 'r') as cbz:
+            file_list = cbz.namelist()
+            # Filter for images
+            image_exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff')
+            images = [f for f in file_list if f.lower().endswith(image_exts)]
+            images.sort()
 
-# ... (Previous imports and functions)
+            total = len(images)
+            for i, img_name in enumerate(images):
+                print(f"Processing page {i+1}/{total}", end='\r', flush=True)
+                img_data = cbz.read(img_name)
+
+                try:
+                    # Use PIL to get image info and handle formats like WebP
+                    img = Image.open(io.BytesIO(img_data))
+                    width, height = img.size
+
+                    # Create page with correct dimensions
+                    page = doc.new_page(width=width, height=height)
+
+                    # Check if format is supported by PyMuPDF,
+                    # if not convert to PNG
+                    ext = os.path.splitext(img_name)[1].lower()
+                    if ext == ".webp":
+                        img_buffer = io.BytesIO()
+                        img.save(img_buffer, format="PNG")
+                        img_data = img_buffer.getvalue()
+
+                    page.insert_image(page.rect, stream=img_data)
+                except Exception as e:
+                    print(f"\nWarning: Could not process {img_name}: {e}")
+
+            # Try to read ComicInfo.xml for metadata
+            if "ComicInfo.xml" in file_list:
+                try:
+                    xml_data = cbz.read("ComicInfo.xml")
+                    root = ET.fromstring(xml_data)
+                    metadata = {}
+
+                    # Map ComicInfo fields to PDF metadata
+                    title = root.find("Title")
+                    if title is not None:
+                        metadata["title"] = title.text
+                    writer = root.find("Writer")
+                    if writer is not None:
+                        metadata["author"] = writer.text
+                    summary = root.find("Summary")
+                    if summary is not None:
+                        metadata["subject"] = summary.text
+
+                    if metadata:
+                        doc.set_metadata(metadata)
+                except Exception as e:
+                    print(f"\nWarning: Could not read ComicInfo.xml: {e}")
+
+        doc.save(pdf_path)
+        print(f"\nConversion complete: {pdf_path}")
+    except Exception as e:
+        print(f"\nError converting {cbz_path}: {e}")
+        doc.close()
+        raise e
+    doc.close()
+
 
 def process_file(file_info):
     """Wrapper for processing a single file, suitable for multiprocessing."""
     input_path, output_path, args = file_info
-    
-    # Re-import fitz inside process for safety if needed (though usually fine with fork)
+
+    # Re-import fitz inside process for safety if needed
     # Determine mode
     ext = os.path.splitext(input_path)[1].lower()
     try:
         if ext == ".pdf":
-            convert_pdf_to_cbz(input_path, output_path, args.format, args.quality, args.dpi, args.grayscale)
+            convert_pdf_to_cbz(
+                input_path, output_path, args.format, args.quality,
+                args.dpi, args.grayscale
+            )
         elif ext in (".cbz", ".zip"):
             convert_cbz_to_pdf(input_path, output_path)
         return f"Successfully processed: {input_path}"
     except Exception as e:
         return f"Error processing {input_path}: {e}"
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Convert PDF to CBZ and vice-versa.")
-    parser.add_argument("--input", "-i", required=True, help="Input file or directory")
-    parser.add_argument("--output", "-o", help="Output file or directory (optional)")
-    parser.add_argument("--format", "-f", choices=["png", "webp"], default="webp", help="Image format for CBZ output (default: webp)")
-    parser.add_argument("--quality", "-q", type=int, choices=range(1, 101), default=80, help="WebP compression quality (1-100)")
-    parser.add_argument("--dpi", "-d", type=int, help="Output DPI for PDF->CBZ (default: PDF native resolution)")
-    parser.add_argument("--grayscale", "-g", action="store_true", help="Convert images to grayscale (PDF->CBZ only)")
-    parser.add_argument("--workers", "-w", type=int, default=os.cpu_count(), help="Number of worker processes for batch mode")
-    
+    parser = argparse.ArgumentParser(
+        description="Convert PDF to CBZ and vice-versa."
+    )
+    parser.add_argument(
+        "--input", "-i", required=True, help="Input file or directory"
+    )
+    parser.add_argument(
+        "--output", "-o", help="Output file or directory (optional)"
+    )
+    parser.add_argument(
+        "--format", "-f", choices=["png", "webp"], default="webp",
+        help="Image format for CBZ output (default: webp)"
+    )
+    parser.add_argument(
+        "--quality", "-q", type=int, choices=range(1, 101), default=80,
+        help="WebP compression quality (1-100)"
+    )
+    parser.add_argument(
+        "--dpi", "-d", type=int,
+        help="Output DPI for PDF->CBZ (default: PDF native resolution)"
+    )
+    parser.add_argument(
+        "--grayscale", "-g", action="store_true",
+        help="Convert images to grayscale (PDF->CBZ only)"
+    )
+    parser.add_argument(
+        "--workers", "-w", type=int, default=os.cpu_count(),
+        help="Number of worker processes for batch mode"
+    )
+
     args = parser.parse_args()
 
     input_path = args.input
@@ -116,27 +210,31 @@ def main():
         # Batch mode
         if output_path and not os.path.exists(output_path):
             os.makedirs(output_path)
-        
+
         for root, _, files in os.walk(input_path):
             for file in files:
                 ext = os.path.splitext(file)[1].lower()
                 if ext in (".pdf", ".cbz", ".zip"):
                     file_in = os.path.join(root, file)
-                    
+
                     # Determine output filename
                     if output_path:
-                        # If output dir specified, flatten structure or keep? Flattening is simpler for now.
-                        # Actually, let's keep it simple: output to output_dir with new extension
+                        # If output dir specified, flatten structure or keep?
+                        # Flattening is simpler for now.
+                        # Actually, let's keep it simple:
+                        # output to output_dir with new extension
                         base_name = os.path.splitext(file)[0]
                         new_ext = ".cbz" if ext == ".pdf" else ".pdf"
-                        file_out = os.path.join(output_path, base_name + new_ext)
+                        file_out = os.path.join(
+                            output_path, base_name + new_ext
+                        )
                     else:
                         # Output in same directory
                         new_ext = ".cbz" if ext == ".pdf" else ".pdf"
                         file_out = os.path.splitext(file_in)[0] + new_ext
-                    
+
                     tasks.append((file_in, file_out, args))
-    
+
     elif os.path.exists(input_path):
         # Single file mode
         ext = os.path.splitext(input_path)[1].lower()
@@ -146,8 +244,8 @@ def main():
                 output_path = os.path.splitext(input_path)[0] + new_ext
             tasks.append((input_path, output_path, args))
         else:
-             print(f"Error: Unsupported file extension '{ext}'.")
-             sys.exit(1)
+            print(f"Error: Unsupported file extension '{ext}'.")
+            sys.exit(1)
     else:
         print(f"Error: Input '{input_path}' not found.")
         sys.exit(1)
@@ -157,16 +255,19 @@ def main():
         sys.exit(0)
 
     print(f"Found {len(tasks)} file(s) to process.")
-    
+
     # Use ProcessPoolExecutor for parallel processing
     # Note: max_workers=1 if only 1 task to avoid overhead, or just use serial
     if len(tasks) == 1:
         print(process_file(tasks[0]))
     else:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=args.workers
+        ) as executor:
             futures = [executor.submit(process_file, task) for task in tasks]
             for future in concurrent.futures.as_completed(futures):
                 print(future.result())
+
 
 if __name__ == "__main__":
     main()

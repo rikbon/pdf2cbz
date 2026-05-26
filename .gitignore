@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+.pytest_cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+
+# Project specific
+data/test_output.cbz
+data/test_back_to_pdf.pdf
+data/test_final.cbz
+reproduce_bug.py
+test_metadata.py
+metadata_test.cbz
+metadata_test.pdf
+repro.cbz
+repro.pdf
+
+# OS
+.DS_Store
+Thmubs.db
